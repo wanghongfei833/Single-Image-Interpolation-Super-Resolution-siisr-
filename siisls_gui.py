@@ -28,6 +28,7 @@ from siisls.utils import psnr as calc_psnr, ssim as calc_ssim, to_gray_float
 class ProcessingThread(QThread):
     """处理线程 - 避免界面卡顿"""
     progress = Signal(float)
+    stage_progress = Signal(float, str)  # 阶段进度值, 阶段文字
     status = Signal(str)
     finished = Signal(bool, str)
     preview_ready = Signal(np.ndarray)
@@ -62,7 +63,7 @@ class ProcessingThread(QThread):
                 return
             overall = base_progress + progress * range_size
             self.progress.emit(overall)
-            self.status.emit(msg)
+            self.stage_progress.emit(progress * 100, msg)
         return callback
 
     def run(self):
@@ -90,24 +91,6 @@ class ProcessingThread(QThread):
         h, w = img_array.shape[:2]
         self.status.emit(f"[DEBUG] LR原始尺寸: {w}x{h}, shape={img_array.shape}")
         self.status.emit(f"实验图像(LR)尺寸: {w}x{h}")
-
-        # 检查最小尺寸要求
-        min_size = 64
-        if h < min_size or w < min_size:
-            self.finished.emit(False, f"图像尺寸太小 ({w}x{h})，至少需要 {min_size}x{min_size}")
-            return
-
-        # 检查是否为4的倍数（算法内部需要）
-        if h % 4 != 0 or w % 4 != 0:
-            self.error_dialog.emit(
-                "尺寸不符合要求",
-                f"实验图像尺寸必须是4的倍数。\n\n"
-                f"当前尺寸: {w}x{h}\n"
-                f"提示：图像尺寸必须是4的倍数（宽高都能被4整除）\n"
-                f"请使用\"制作数据\"按钮重新生成符合要求的图像。"
-            )
-            self.finished.emit(False, "图像尺寸不符合要求（需为4的倍数）")
-            return
 
         # 加载对照图像（Ground Truth）
         gt_array = None
@@ -429,12 +412,28 @@ class MainWindow(QMainWindow):
         metrics_group.setLayout(metrics_layout)
         layout.addWidget(metrics_group)
 
-        # ===== 进度条 =====
+        # ===== 双进度条 =====
+        # 总进度条
         self.progress_bar = QProgressBar()
-        self.progress_bar.setMinimumHeight(20)
+        self.progress_bar.setMinimumHeight(25)
         self.progress_bar.setRange(0, 1000)
-        self.progress_bar.setFormat("%p% - %s")
+        self.progress_bar.setFormat("总进度: %p%")
+        self.progress_bar.setStyleSheet("""
+            QProgressBar { border: 1px solid #aaa; border-radius: 3px; text-align: center; background: #f0f0f0; }
+            QProgressBar::chunk { background: #4CAF50; }
+        """)
         layout.addWidget(self.progress_bar)
+
+        # 阶段进度条
+        self.stage_progress_bar = QProgressBar()
+        self.stage_progress_bar.setMinimumHeight(25)
+        self.stage_progress_bar.setRange(0, 100)
+        self.stage_progress_bar.setFormat("%p% - %s")
+        self.stage_progress_bar.setStyleSheet("""
+            QProgressBar { border: 1px solid #aaa; border-radius: 3px; text-align: center; background: #f5f5f5; }
+            QProgressBar::chunk { background: #2196F3; }
+        """)
+        layout.addWidget(self.stage_progress_bar)
 
         # ===== 控制按钮 =====
         btn_layout = QHBoxLayout()
@@ -482,6 +481,7 @@ class MainWindow(QMainWindow):
     def setup_thread(self):
         self.processing_thread = ProcessingThread(self)
         self.processing_thread.progress.connect(self.update_progress)
+        self.processing_thread.stage_progress.connect(self.update_stage_progress)
         self.processing_thread.status.connect(self.update_status)
         self.processing_thread.finished.connect(self.processing_finished)
         self.processing_thread.preview_ready.connect(self.update_preview)
@@ -635,21 +635,9 @@ class MainWindow(QMainWindow):
             self.log(f"原图尺寸: {w}x{h}")
 
             # 计算满足条件的尺寸:
-            # 1. GT必须是8的倍数（因为GT=LR*2, LR需是4的倍数）
-            # 2. 向下取整到8的倍数
+            # 向下取整到8的倍数（算法要求）
             new_h = (h // 8) * 8
             new_w = (w // 8) * 8
-
-            # 如果尺寸变化过大，说明原图太小
-            min_size = 64
-            if new_h < min_size or new_w < min_size:
-                QMessageBox.warning(
-                    self, "图像太小",
-                    f"图像尺寸 {w}x{h} 太小，制作数据失败。\n"
-                    f"需要至少 {min_size}x{min_size} 的图像（且宽高需能被8整除）",
-                    QMessageBox.Ok
-                )
-                return
 
             # 裁剪原图到修正尺寸
             if new_h != h or new_w != w:
@@ -759,8 +747,12 @@ class MainWindow(QMainWindow):
     def update_progress(self, value):
         self.progress_bar.setValue(int(value * 10))
 
+    def update_stage_progress(self, value, msg):
+        self.stage_progress_bar.setValue(int(value))
+        self.stage_progress_bar.setFormat(f"%p% - {msg}")
+
     def update_status(self, status):
-        self.progress_bar.setFormat(f"%p% - {status}")
+        self.progress_bar.setFormat(f"总进度: %p% - {status}")
 
     def update_metrics(self, psnr, ssim, has_reference):
         """更新精度显示"""
